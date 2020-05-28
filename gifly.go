@@ -3,14 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	//"net/http"
@@ -73,19 +71,20 @@ type SearchRequest struct {
 }
 
 func main() {
-	r := gin.New()
+	// r := gin.New()
 
-	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
-		// your custom format
-		return fmt.Sprintf("%s - [%s] \"%d %s %s\"\n",
-			param.TimeStamp.Format(time.RFC1123),
-			param.Method,
-			param.StatusCode,
-			param.Latency,
-			param.ErrorMessage,
-		)
-	}))
-	r.Use(gin.Recovery())
+	// r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
+	// 	// your custom format
+	// 	return fmt.Sprintf("%s - [%s] \"%d %s %s\"\n",
+	// 		param.TimeStamp.Format(time.RFC1123),
+	// 		param.Method,
+	// 		param.StatusCode,
+	// 		param.Latency,
+	// 		param.ErrorMessage,
+	// 	)
+	// }))
+	// r.Use(gin.Recovery())
+	r := gin.Default()
 
 	var err error
 	var ok bool
@@ -114,8 +113,9 @@ func main() {
 	}
 
 	r.GET("/v1/gifs/search", processSearch)
-
-	r.NoRoute(proxyAll)
+	r.GET("/v1/gifs/trending", proxyAll)
+	r.GET("/v1/gifs/translate", proxyAll)
+	r.GET("/v1/gifs/random", proxyAll)
 
 	r.Run(":" + port)
 }
@@ -188,9 +188,28 @@ func proxyAll(c *gin.Context) {
 	newURL.Scheme = "https"
 	newURL.Host = giphyhost
 
+	values, err := url.ParseQuery(newURL.RawQuery)
+
+	if err != nil {
+		c.Status(http.StatusUnprocessableEntity)
+		return
+	}
+
+	apikey := values.Get("api_key")
+
+	if apikey != "" {
+		if !passthruapikey {
+			values.Set("api_key", defaultapikey)
+		}
+	} else {
+		values.Add("api_key", defaultapikey)
+	}
+
+	newURL.RawQuery = values.Encode()
+
 	res, err := http.Get(newURL.String())
 	if err != nil {
-		c.Status(404)
+		c.Status(http.StatusNotFound)
 		return
 	}
 	defer res.Body.Close()
