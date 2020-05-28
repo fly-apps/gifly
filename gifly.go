@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	//"net/http"
@@ -56,9 +58,11 @@ type Meta struct {
 	ResponseID string `json:"response_id"`
 }
 
-const giphyendpoint = "http://api.giphy.com/v1/gifs/search"
+const giphyendpoint = "https://api.giphy.com/v1/gifs/search"
+const giphyhost = "api.giphy.com"
 
 var defaultapikey = ""
+var passthruapikey = false
 var port int
 
 // SearchRequest - a minimal Request to search
@@ -69,13 +73,39 @@ type SearchRequest struct {
 }
 
 func main() {
-	r := gin.Default()
+	r := gin.New()
 
-	defaultapikey, ok := os.LookupEnv("GIPHYAPIKEY")
+	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
+		// your custom format
+		return fmt.Sprintf("%s - [%s] \"%d %s %s\"\n",
+			param.TimeStamp.Format(time.RFC1123),
+			param.Method,
+			param.StatusCode,
+			param.Latency,
+			param.ErrorMessage,
+		)
+	}))
+	r.Use(gin.Recovery())
+
+	var err error
+	var ok bool
+
+	defaultapikey, ok = os.LookupEnv("GIPHYAPIKEY")
 
 	if !ok {
 		log.Println("No GIPHYAPIKEY in environment")
 		os.Exit(1)
+	}
+
+	tmppassthrough, ok := os.LookupEnv("GIPHYKEYPASSTHROUGH")
+	if !ok {
+		passthruapikey = false
+	} else {
+		passthruapikey, err = strconv.ParseBool(tmppassthrough)
+		if err != nil {
+			log.Println("GIPHYKEYPASSTHROUGH not a boolean value - setting off")
+			passthruapikey = false
+		}
 	}
 
 	port, ok := os.LookupEnv("PORT")
@@ -83,64 +113,98 @@ func main() {
 		port = "8080"
 	}
 
-	r.GET("/v1/gifs/search", func(c *gin.Context) {
-		var searchrequest SearchRequest
+	r.GET("/v1/gifs/search", processSearch)
 
-		if c.ShouldBind(&searchrequest) == nil {
-			newparams := url.Values{}
-			newparams.Add("q", searchrequest.Query)
-			if searchrequest.APIKey == "" {
-				newparams.Add("api_key", defaultapikey)
+	r.NoRoute(proxyAll)
 
-			} else {
-				newparams.Add("api_key", searchrequest.APIKey)
-			}
-			if searchrequest.Limit == 0 {
-				newparams.Add("limit", "10")
-			} else {
-				newparams.Add("limit", strconv.Itoa(searchrequest.Limit))
-			}
+	r.Run(":" + port)
+}
 
-			baseURL, err := url.Parse(giphyendpoint)
-			if err != nil {
-				c.Status(500)
-				return
-			}
-			baseURL.RawQuery = newparams.Encode()
-			res, err := http.Get(baseURL.String())
-			if err != nil {
-				c.Status(404)
-				return
-			}
-			defer res.Body.Close()
+func processSearch(c *gin.Context) {
+	var searchrequest SearchRequest
 
-			w := c.Writer
+	if c.ShouldBind(&searchrequest) == nil {
+		newparams := url.Values{}
+		newparams.Add("q", searchrequest.Query)
+		if searchrequest.APIKey == "" {
+			newparams.Add("api_key", defaultapikey)
 
-			for headername, values := range res.Header {
-				w.Header()[headername] = values
-			}
+		} else {
+			newparams.Add("api_key", searchrequest.APIKey)
+		}
 
-			w.WriteHeader(res.StatusCode)
+		if searchrequest.Limit == 0 {
+			newparams.Add("limit", "10")
+		} else {
+			newparams.Add("limit", strconv.Itoa(searchrequest.Limit))
+		}
 
-			var buf bytes.Buffer
-
-			io.Copy(w, io.TeeReader(res.Body, &buf))
-
-			var giphysearchresponse GiphySearchResponse
-
-			err = json.NewDecoder(&buf).Decode(&giphysearchresponse)
-
-			// Example - Dump the entire response
-			// fmt.Printf("%#v\n", giphysearchresponse)
-
-			// Example - iterate over the decoded response
-			//
-			// for _, v := range giphysearchresponse.Data {
-			// 	fmt.Println(v.Type, v.EmbedURL)
-			// }
-
+		baseURL, err := url.Parse(giphyendpoint)
+		if err != nil {
+			c.Status(500)
 			return
 		}
-	})
-	r.Run(":" + port)
+
+		baseURL.RawQuery = newparams.Encode()
+		res, err := http.Get(baseURL.String())
+		if err != nil {
+			c.Status(404)
+			return
+		}
+		defer res.Body.Close()
+
+		w := c.Writer
+
+		for headername, values := range res.Header {
+			w.Header()[headername] = values
+		}
+
+		w.WriteHeader(res.StatusCode)
+
+		var buf bytes.Buffer
+
+		io.Copy(w, io.TeeReader(res.Body, &buf))
+
+		var giphysearchresponse GiphySearchResponse
+
+		err = json.NewDecoder(&buf).Decode(&giphysearchresponse)
+
+		// Example - Dump the entire response
+		// fmt.Printf("%#v\n", giphysearchresponse)
+
+		// Example - iterate over the decoded response
+		//
+		// for _, v := range giphysearchresponse.Data {
+		// 	fmt.Println(v.Type, v.EmbedURL)
+		// }
+
+		return
+	}
+}
+
+func proxyAll(c *gin.Context) {
+	newURL := c.Request.URL
+
+	newURL.Scheme = "https"
+	newURL.Host = giphyhost
+
+	res, err := http.Get(newURL.String())
+	if err != nil {
+		c.Status(404)
+		return
+	}
+	defer res.Body.Close()
+
+	w := c.Writer
+
+	for headername, values := range res.Header {
+		w.Header()[headername] = values
+	}
+
+	w.WriteHeader(res.StatusCode)
+
+	io.Copy(w, res.Body)
+
+	return
+
 }
